@@ -251,6 +251,17 @@ class Mega:
                 file['k'] = k
                 attributes = base64_url_decode(file['a'])
                 attributes = decrypt_attr(attributes, k)
+                if attributes and 'n' in attributes:
+                    try:
+                        if isinstance(attributes['n'], bytes):
+                            attributes['n'] = attributes['n'].decode('utf-8')
+                        elif isinstance(attributes['n'], str):
+                            attributes['n'] = attributes['n'].encode('latin-1', 'ignore').decode('utf-8', 'ignore')
+                    except (UnicodeEncodeError, UnicodeDecodeError):
+                        try:
+                            attributes['n'] = attributes['n'].encode('utf-8', 'ignore').decode('utf-8')
+                            except:
+                                pass
                 file['a'] = attributes
             # other => wrong object
             elif file['k'] == '':

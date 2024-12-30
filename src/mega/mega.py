@@ -260,8 +260,8 @@ class Mega:
                     except (UnicodeEncodeError, UnicodeDecodeError):
                         try:
                             attributes['n'] = attributes['n'].encode('utf-8', 'ignore').decode('utf-8')
-                            except:
-                                pass
+                        except:
+                            pass
                 file['a'] = attributes
             # other => wrong object
             elif file['k'] == '':

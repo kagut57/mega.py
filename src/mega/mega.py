@@ -15,6 +15,7 @@ import tempfile
 import shutil
 
 import requests
+from .errors import RequestError
 from tenacity import retry, wait_exponential, retry_if_exception_type
 
 from .errors import ValidationError, RequestError
@@ -158,35 +159,57 @@ class Mega:
         if self.sid:
             params.update({'sid': self.sid})
 
-        # ensure input data is a list
         if not isinstance(data, list):
             data = [data]
 
         url = f'{self.schema}://g.api.{self.domain}/cs'
-        response = requests.post(
-            url,
-            params=params,
-            data=json.dumps(data),
-            timeout=self.timeout,
-        )
-        json_resp = json.loads(response.text)
+
         try:
-            if isinstance(json_resp, list):
-                int_resp = json_resp[0] if isinstance(json_resp[0],
-                                                      int) else None
-            elif isinstance(json_resp, int):
-                int_resp = json_resp
-        except IndexError:
-            int_resp = None
-        if int_resp is not None:
-            if int_resp == 0:
-                return int_resp
-            if int_resp == -3:
-                msg = 'Request failed, retrying'
-                logger.info(msg)
-                raise RuntimeError(msg)
-            raise RequestError(int_resp)
-        return json_resp[0]
+            response = requests.post(
+                url,
+                params=params,
+                data=json.dumps(data),
+                timeout=self.timeout,
+            )
+            
+            response.raise_for_status()
+            
+            if not response.text:
+                raise RequestError("Empty response received from API")
+                
+            try:
+                json_resp = json.loads(response.text)
+            except json.JSONDecodeError as e:
+                if response.text in ['-3', '-15', '-16', '-17']:
+                    return int(response.text)
+                logger.error(f"Invalid JSON response: {response.text}")
+                raise RequestError(f"Invalid response format: {str(e)}")
+                
+            try:
+                if isinstance(json_resp, list):
+                    int_resp = json_resp[0] if isinstance(json_resp[0], int) else None
+                elif isinstance(json_resp, int):
+                    int_resp = json_resp
+                else:
+                    int_resp = None
+                    
+                if int_resp is not None:
+                    if int_resp == 0:
+                        return int_resp
+                    if int_resp == -3:
+                        msg = 'Request failed, retrying'
+                        logger.info(msg)
+                        raise RuntimeError(msg)
+                    raise RequestError(int_resp)
+                    
+                return json_resp[0] if isinstance(json_resp, list) else json_resp
+                
+            except (IndexError, KeyError) as e:
+                raise RequestError(f"Unexpected response structure: {str(e)}")
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed: {str(e)}")
+            raise RequestError(f"API request failed: {str(e)}")
 
     def _parse_url(self, url):
         """Parse file id and key from url."""

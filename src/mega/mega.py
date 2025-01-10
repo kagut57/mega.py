@@ -13,9 +13,8 @@ import random
 import binascii
 import tempfile
 import shutil
-
 import requests
-from .errors import RequestError
+from base64 import b64encode, b64decode
 from tenacity import retry, wait_exponential, retry_if_exception_type
 
 from .errors import ValidationError, RequestError
@@ -27,54 +26,32 @@ from .crypto import (a32_to_base64, encrypt_key, base64_url_encode,
 
 logger = logging.getLogger(__name__)
 
-
 class Mega:
     def __init__(self, options=None):
         self.schema = 'https'
         self.domain = 'mega.co.nz'
-        self.timeout = 160  # max secs to wait for resp from api requests
+        self.timeout = 160
         self.sid = None
         self.sequence_num = random.randint(0, 0xFFFFFFFF)
         self.request_id = make_id(10)
         self._trash_folder_node_id = None
-
+        self.session = requests.Session()
+        
         if options is None:
             options = {}
         self.options = options
 
     def login(self, email=None, password=None):
         if email:
-            self._login_user(email, password)
+            success, message = self._login_user(email, password)
+            if not success:
+                raise RequestError(message)
         else:
             self.login_anonymous()
+            
         self._trash_folder_node_id = self.get_node_by_type(4)[0]
         logger.info('Login complete')
         return self
-
-    def _login_user(self, email, password):
-        logger.info('Logging in user...')
-        email = email.lower()
-        get_user_salt_resp = self._api_request({'a': 'us0', 'user': email})
-        user_salt = None
-        try:
-            user_salt = base64_to_a32(get_user_salt_resp['s'])
-        except KeyError:
-            # v1 user account
-            password_aes = prepare_key(str_to_a32(password))
-            user_hash = stringhash(email, password_aes)
-        else:
-            # v2 user account
-            pbkdf2_key = hashlib.pbkdf2_hmac(hash_name='sha512',
-                                             password=password.encode(),
-                                             salt=a32_to_str(user_salt),
-                                             iterations=100000,
-                                             dklen=32)
-            password_aes = str_to_a32(pbkdf2_key[:16])
-            user_hash = base64_url_encode(pbkdf2_key[-16:])
-        resp = self._api_request({'a': 'us', 'user': email, 'uh': user_hash})
-        if isinstance(resp, int):
-            raise RequestError(resp)
-        self._login_process(resp, password_aes)
 
     def login_anonymous(self):
         logger.info('Logging in anonymous temporary user...')
@@ -98,6 +75,111 @@ class Mega:
             raise RequestError(resp)
         self._login_process(resp, password_key)
 
+    def _login_user(self, email, password):
+        try:
+            logger.info('Logging in user...')
+            email = email.lower()
+            
+            # Get user salt
+            logger.debug("Getting user salt...")
+            salt_resp = self._api_request({'a': 'us0', 'user': email})
+            
+            # Handle V2 vs V1 accounts
+            if 's' in salt_resp:
+                logger.debug("V2 account detected, using PBKDF2...")
+                user_salt = base64_url_decode(salt_resp['s'])
+                pbkdf2_key = hashlib.pbkdf2_hmac(
+                    'sha512',
+                    password.encode(),
+                    user_salt,
+                    100000,
+                    32
+                )
+                password_aes = str_to_a32(pbkdf2_key[:16])
+                user_hash = base64_url_encode(pbkdf2_key[-16:])
+            else:
+                logger.debug("V1 account detected, using old method...")
+                password_aes = prepare_key(str_to_a32(password))
+                user_hash = stringhash(email, password_aes)
+            
+            # Perform login
+            logger.debug("Attempting login...")
+            resp = self._api_request({'a': 'us', 'user': email, 'uh': user_hash})
+            
+            if isinstance(resp, int):
+                error_codes = {
+                    -2: "Bad arguments",
+                    -3: "Request failed, rate limit?",
+                    -4: "Too many requests",
+                    -9: "Invalid credentials",
+                    -11: "Invalid argument",
+                    -14: "Unknown error",
+                    -15: "Invalid request",
+                    -16: "Account not found",
+                    -17: "Account blocked"
+                }
+                raise RequestError(f"Login failed with code {resp}: {error_codes.get(resp, 'Unknown error')}")
+            
+            self._login_process(resp, password_aes)
+            return True, "Login successful"
+            
+        except Exception as e:
+            return False, str(e)
+
+    @retry(retry=retry_if_exception_type(RuntimeError),
+           wait=wait_exponential(multiplier=2, min=2, max=60))
+    def _api_request(self, data):
+        params = {'id': self.sequence_num}
+        self.sequence_num += 1
+
+        if self.sid:
+            params.update({'sid': self.sid})
+
+        if not isinstance(data, list):
+            data = [data]
+
+        url = f'{self.schema}://g.api.{self.domain}/cs'
+        
+        try:
+            response = self.session.post(
+                url,
+                params=params,
+                data=json.dumps(data),
+                timeout=self.timeout,
+            )
+            
+            if not response.text:
+                raise RequestError("Empty response from API")
+                
+            json_resp = json.loads(response.text)
+            
+            try:
+                if isinstance(json_resp, list):
+                    int_resp = json_resp[0] if isinstance(json_resp[0], int) else None
+                elif isinstance(json_resp, int):
+                    int_resp = json_resp
+            except IndexError:
+                int_resp = None
+                
+            if int_resp is not None:
+                if int_resp == 0:
+                    return int_resp
+                if int_resp == -3:
+                    msg = 'Request failed, retrying'
+                    logger.info(msg)
+                    raise RuntimeError(msg)
+                raise RequestError(int_resp)
+                
+            return json_resp[0]
+            
+        except requests.exceptions.RequestException as e:
+            raise RequestError(f"Network error: {str(e)}")
+        except json.JSONDecodeError as e:
+            raise RequestError(f"JSON decode error: {str(e)}, Response: {response.text}")
+        except Exception as e:
+            raise RequestError(f"Error: {str(e)}")
+
+    # Rest of the Mega class implementation remains the same...
     def _login_process(self, resp, password):
         encrypted_master_key = base64_to_a32(resp['k'])
         self.master_key = decrypt_key(encrypted_master_key, password)
@@ -113,14 +195,10 @@ class Mega:
                                           self.master_key)
 
             private_key = a32_to_str(rsa_private_key)
-            # The private_key contains 4 MPI integers concatenated together.
             rsa_private_key = [0, 0, 0, 0]
             for i in range(4):
-                # An MPI integer has a 2-byte header which describes the number
-                # of bits in the integer.
                 bitlength = (private_key[0] * 256) + private_key[1]
                 bytelength = math.ceil(bitlength / 8)
-                # Add 2 bytes to accommodate the MPI header
                 bytelength += 2
                 rsa_private_key[i] = mpi_to_int(private_key[:bytelength])
                 private_key = private_key[bytelength:]
@@ -128,9 +206,6 @@ class Mega:
             first_factor_p = rsa_private_key[0]
             second_factor_q = rsa_private_key[1]
             private_exponent_d = rsa_private_key[2]
-            # In MEGA's webclient javascript, they assign [3] to a variable
-            # called u, but I do not see how it corresponds to pycryptodome's
-            # RSA.construct and it does not seem to be necessary.
             rsa_modulus_n = first_factor_p * second_factor_q
             phi = (first_factor_p - 1) * (second_factor_q - 1)
             public_exponent_e = modular_inverse(private_exponent_d, phi)
@@ -149,68 +224,7 @@ class Mega:
             sid = '%x' % rsa_decrypter._decrypt(encrypted_sid)
             sid = binascii.unhexlify('0' + sid if len(sid) % 2 else sid)
             self.sid = base64_url_encode(sid[:43])
-
-    @retry(retry=retry_if_exception_type(RuntimeError),
-           wait=wait_exponential(multiplier=2, min=2, max=60))
-    def _api_request(self, data):
-        params = {'id': self.sequence_num}
-        self.sequence_num += 1
-
-        if self.sid:
-            params.update({'sid': self.sid})
-
-        if not isinstance(data, list):
-            data = [data]
-
-        url = f'{self.schema}://g.api.{self.domain}/cs'
-
-        try:
-            response = requests.post(
-                url,
-                params=params,
-                data=json.dumps(data),
-                timeout=self.timeout,
-            )
-            
-            response.raise_for_status()
-            
-            if not response.text:
-                raise RequestError("Empty response received from API")
-                
-            try:
-                json_resp = json.loads(response.text)
-            except json.JSONDecodeError as e:
-                if response.text in ['-3', '-15', '-16', '-17']:
-                    return int(response.text)
-                logger.error(f"Invalid JSON response: {response.text}")
-                raise RequestError(f"Invalid response format: {str(e)}")
-                
-            try:
-                if isinstance(json_resp, list):
-                    int_resp = json_resp[0] if isinstance(json_resp[0], int) else None
-                elif isinstance(json_resp, int):
-                    int_resp = json_resp
-                else:
-                    int_resp = None
-                    
-                if int_resp is not None:
-                    if int_resp == 0:
-                        return int_resp
-                    if int_resp == -3:
-                        msg = 'Request failed, retrying'
-                        logger.info(msg)
-                        raise RuntimeError(msg)
-                    raise RequestError(int_resp)
-                    
-                return json_resp[0] if isinstance(json_resp, list) else json_resp
-                
-            except (IndexError, KeyError) as e:
-                raise RequestError(f"Unexpected response structure: {str(e)}")
-                
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed: {str(e)}")
-            raise RequestError(f"API request failed: {str(e)}")
-
+          
     def _parse_url(self, url):
         """Parse file id and key from url."""
         if '/file/' in url:

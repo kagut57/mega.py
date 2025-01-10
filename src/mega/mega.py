@@ -208,7 +208,7 @@ class Mega:
                 raise RequestError(f"Unexpected response structure: {str(e)}")
                 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed: {str(e)}")
+            logger.error(f"Request failed: Payload: {data} - {str(e)}")
             raise RequestError(f"API request failed: {str(e)}")
 
     def _parse_url(self, url):

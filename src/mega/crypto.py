@@ -1,7 +1,6 @@
 from Crypto.Cipher import AES
 import json
 import base64
-from base64 import b64encode, b64decode
 import struct
 import binascii
 import random
@@ -43,40 +42,26 @@ def aes_cbc_decrypt_a32(data, key):
     return str_to_a32(aes_cbc_decrypt(a32_to_str(data), a32_to_str(key)))
 
 
-def str_to_a32(b):
-    if isinstance(b, str):
-        return str_to_a32(b.encode('utf8'))
-    if len(b) % 4:
-        b += b'\0' * (4 - len(b) % 4)
-    return [(int.from_bytes(b[i:i + 4], byteorder='big')) 
-            for i in range(0, len(b), 4)]
-
-def prepare_key(a):
-    pkey = [0x93C467E3, 0x7DB0C7A4, 0xD1BE3F81, 0x0152CB56]
-    for r in range(0x10000):
-        for j in range(0, len(a), 4):
-            key = [0, 0, 0, 0]
-            for i in range(4):
-                if i + j < len(a):
-                    key[i] = a[i + j]
-            for i in range(4):
-                pkey[i] ^= key[i]
-    return pkey
-
-def stringhash(s, aeskey):
-    s32 = str_to_a32(s)
+def stringhash(str, aeskey):
+    s32 = str_to_a32(str)
     h32 = [0, 0, 0, 0]
     for i in range(len(s32)):
         h32[i % 4] ^= s32[i]
-    for _ in range(0x4000):
-        for j in range(0, len(h32), 4):
+    for r in range(0x4000):
+        h32 = aes_cbc_encrypt_a32(h32, aeskey)
+    return a32_to_base64((h32[0], h32[2]))
+
+
+def prepare_key(arr):
+    pkey = [0x93C467E3, 0x7DB0C7A4, 0xD1BE3F81, 0x0152CB56]
+    for r in range(0x10000):
+        for j in range(0, len(arr), 4):
             key = [0, 0, 0, 0]
-            for k in range(4):
-                if j + k < len(h32):
-                    key[k] = h32[j + k]
-            for k in range(4):
-                h32[j + k] ^= aeskey[k]
-    return base64_url_encode(bytes(str_to_a32(str(h32))))
+            for i in range(4):
+                if i + j < len(arr):
+                    key[i] = arr[i + j]
+            pkey = aes_cbc_encrypt_a32(pkey, key)
+    return pkey
 
 
 def encrypt_key(a, key):
@@ -107,6 +92,15 @@ def a32_to_str(a):
     return struct.pack('>%dI' % len(a), *a)
 
 
+def str_to_a32(b):
+    if isinstance(b, str):
+        b = makebyte(b)
+    if len(b) % 4:
+        # pad to multiple of 4
+        b += b'\0' * (4 - len(b) % 4)
+    return struct.unpack('>%dI' % (len(b) / 4), b)
+
+
 def mpi_to_int(s):
     """
     A Multi-precision integer is encoded as a series of bytes in big-endian
@@ -131,16 +125,24 @@ def modular_inverse(a, m):
     else:
         return x % m
 
-def base64_url_decode(data):
-    data += '=' * (4 - len(data) % 4)
-    return b64decode(data.replace('-', '+').replace('_', '/'))
 
-def base64_url_encode(data):
-    return b64encode(data).decode().replace('+', '-').replace('/', '_').rstrip('=')
+def base64_url_decode(data):
+    data += '=='[(2 - len(data) * 3) % 4:]
+    for search, replace in (('-', '+'), ('_', '/'), (',', '')):
+        data = data.replace(search, replace)
+    return base64.b64decode(data)
 
 
 def base64_to_a32(s):
     return str_to_a32(base64_url_decode(s))
+
+
+def base64_url_encode(data):
+    data = base64.b64encode(data)
+    data = makestring(data)
+    for search, replace in (('+', '-'), ('/', '_'), ('=', '')):
+        data = data.replace(search, replace)
+    return data
 
 
 def a32_to_base64(a):

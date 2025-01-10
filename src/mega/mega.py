@@ -125,9 +125,7 @@ class Mega:
             
         except Exception as e:
             return False, str(e)
-
-    @retry(retry=retry_if_exception_type(RuntimeError),
-           wait=wait_exponential(multiplier=2, min=2, max=60))
+          
     def _api_request(self, data):
         params = {'id': self.sequence_num}
         self.sequence_num += 1

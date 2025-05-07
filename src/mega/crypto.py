@@ -5,6 +5,24 @@ import struct
 import binascii
 import random
 
+import sys
+
+# Python3 compatibility
+if sys.version_info < (3, ):
+
+    def makebyte(x):
+        return x
+
+    def makestring(x):
+        return x
+else:
+    import codecs
+
+    def makebyte(x):
+        return codecs.latin_1_encode(x)[0]
+
+    def makestring(x):
+        return codecs.latin_1_decode(x)[0]
 
 def aes_cbc_encrypt(data: bytes, key: bytes) -> bytes:
     aes_cipher = AES.new(key, AES.MODE_CBC, b'\0' * 16)
